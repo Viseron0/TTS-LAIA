@@ -1,0 +1,127 @@
+import asyncio
+import websockets
+import requests
+from io import BytesIO
+from pydub import AudioSegment
+import simpleaudio as sa
+import json
+import time
+import os
+
+# Función para hacer la solicitud POST a la API y obtener el JSON
+def obtener_respuesta_api():
+    url = "https://aplicativos.ugc.edu.co/servicio/openia/gpt/start"
+    
+    # Payload de la solicitud POST
+    payload = {
+        "user_input": "Hello, how are you?"  # Modificar si es necesario
+    }
+
+    # Realizar la solicitud POST a la API
+    response = requests.post(url, json=payload)
+
+    # Verificar si la solicitud fue exitosa
+    if response.status_code == 200:
+        return response.json()  # Retorna el JSON como un diccionario
+    else:
+        print(f"Error en la API: {response.status_code}")
+        print(response.text)
+        return None
+
+# Función para dividir el texto en fragmentos
+def dividir_texto_en_fragmentos(text, max_length=100):
+    palabras = text.split()  # Dividir el texto en palabras
+    fragmentos = []
+    fragmento_actual = []
+
+    for palabra in palabras:
+        if len(' '.join(fragmento_actual + [palabra])) <= max_length:
+            fragmento_actual.append(palabra)
+        else:
+            fragmentos.append(' '.join(fragmento_actual))
+            fragmento_actual = [palabra]
+    
+    # Agregar el último fragmento si es necesario
+    if fragmento_actual:
+        fragmentos.append(' '.join(fragmento_actual))
+    
+    return fragmentos
+
+# Función para convertir el texto a voz utilizando OpenAI TTS
+def text_to_speech(text_fragment):
+    api_key = os.getenv("OPENAI_API_KEY")
+    url = 'https://api.openai.com/v1/audio/speech'
+    
+    data = {
+        "model": "tts-1",  # Usa "tts-1-hd" para mayor calidad si lo necesitas
+        "input": text_fragment,
+        "voice": "alloy",
+        "response_format": "mp3"
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Realizar la solicitud POST a OpenAI TTS
+    response = requests.post(url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        return BytesIO(response.content)  # Devuelve el audio en memoria
+    else:
+        print(f"Error en TTS: {response.status_code}")
+        print(response.text)
+        return None
+
+# Función para reproducir el audio
+def play_audio(audio_stream):
+    audio = AudioSegment.from_file(audio_stream, format="mp3")
+    playback = sa.play_buffer(
+        audio.raw_data,
+        num_channels=audio.channels,
+        bytes_per_sample=audio.sample_width,
+        sample_rate=audio.frame_rate
+    )
+    playback.wait_done()
+
+# Función WebSocket para manejar la conexión y enviar el audio
+async def handle_connection(websocket, path):
+    print("Cliente conectado")
+
+    while True:
+        # Hacer la solicitud a la API cada vez que el cliente envíe un mensaje
+        await websocket.recv()
+
+        # Obtener la respuesta de la API
+        respuesta_json = obtener_respuesta_api()
+
+        if respuesta_json:
+            # Extraer el campo "response" del JSON
+            mensaje = respuesta_json.get("response", "No se encontró respuesta")
+            print(f"Respuesta recibida: {mensaje}")
+
+            # Dividir el mensaje en fragmentos más pequeños
+            fragmentos = dividir_texto_en_fragmentos(mensaje, max_length=100)
+
+            # Procesar cada fragmento de texto por separado
+            for fragmento in fragmentos:
+                print(f"Procesando fragmento: {fragmento}")
+                audio_stream = text_to_speech(fragmento)
+
+                if audio_stream:
+                    # Reproducir el audio generado fragmento por fragmento
+                    play_audio(audio_stream)
+            
+            # Enviar una respuesta de confirmación al cliente WebSocket
+            await websocket.send(f"Audio generado y reproducido para el mensaje: {mensaje}")
+        
+        # Pausa para evitar hacer peticiones demasiado frecuentes (5 segundos, ajustable)
+        await asyncio.sleep(5)
+
+# Iniciar el servidor WebSocket en el puerto 8765
+start_server = websockets.serve(handle_connection, "localhost", 8765)
+
+# Ejecutar el servidor WebSocket
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
